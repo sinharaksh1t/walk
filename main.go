@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	. "strings"
 	"time"
 	"unicode/utf8"
@@ -168,6 +169,9 @@ type model struct {
 	showHelp              bool                // Show help
 	statusBar             *vm.Program         // Status bar program.
 	quitting              bool                // Whether we are quitting the program.
+
+	// Might consider changing it to simply a slice of []string instead of a custom type
+	selectedFiles []selectedFile // List of files that have been selected
 }
 
 type position struct {
@@ -178,6 +182,10 @@ type position struct {
 type toDelete struct {
 	path string
 	at   time.Time
+}
+
+type selectedFile struct {
+	path string
 }
 
 type (
@@ -305,9 +313,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.list()
 			return m, nil
 
-		case key.Matches(msg, keyUp):
-			m.moveUp()
-
 		case key.Matches(msg, keyTop, keyPageUp, keyVimTop):
 			m.moveTop()
 
@@ -326,25 +331,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keyEnd):
 			m.moveEnd()
 
-		case key.Matches(msg, keyVimUp):
+		case key.Matches(msg, keyUp):
 			m.moveUp()
 
 		case key.Matches(msg, keyDown):
 			m.moveDown()
 
-		case key.Matches(msg, keyVimDown):
-			m.moveDown()
-
 		case key.Matches(msg, keyLeft):
 			m.moveLeft()
 
-		case key.Matches(msg, keyVimLeft):
-			m.moveLeft()
-
 		case key.Matches(msg, keyRight):
-			m.moveRight()
-
-		case key.Matches(msg, keyVimRight):
 			m.moveRight()
 
 		case key.Matches(msg, keySearch):
@@ -390,6 +386,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, nil
+
+		// Visual mode (aka selection mode). Used only while deleting multiple files/directories.
+		case key.Matches(msg, keySelect):
+			filePathToSelect, ok := m.currentFile()
+			if ok {
+				if pos := indexOf(filePathToSelect.Name(), m.selectedFiles); pos > -1 {
+					if pos == len(m.selectedFiles)-1 {
+						m.selectedFiles = m.selectedFiles[:pos]
+					} else {
+						m.selectedFiles = append(m.selectedFiles[:pos], m.selectedFiles[pos+1:]...)
+					}
+				} else {
+					m.selectedFiles = append(m.selectedFiles, selectedFile{path: filePathToSelect.Name()})
+				}
+			}
 
 		case key.Matches(msg, keyYank):
 			filePath, ok := m.filePath()
@@ -474,7 +485,8 @@ func (m *model) View() string {
 	height := m.listHeight()
 
 	var names [][]string
-	names, m.rows, m.columns = wrap(m.files, width, height, func(name string, i, j int) {
+
+	names, m.rows, m.columns = wrap(m.files, m.selectedFiles, width, height, func(name string, i, j int) {
 		if m.findPrevName && m.prevName == name {
 			m.c = i
 			m.r = j
@@ -855,7 +867,7 @@ func (m *model) preview() {
 			return
 		}
 
-		names, rows, columns := wrap(files, width, height, nil)
+		names, rows, columns := wrap(files, m.selectedFiles, width, height, nil)
 
 		output := make([]string, rows)
 		for j := 0; j < rows; j++ {
@@ -926,7 +938,7 @@ func (m *model) preview() {
 }
 
 // TODO: Write tests for this function.
-func wrap(files []os.DirEntry, width int, height int, callback func(name string, i, j int)) ([][]string, int, int) {
+func wrap(files []os.DirEntry, selectedFiles []selectedFile, width int, height int, callback func(name string, i, j int)) ([][]string, int, int) {
 	// If the directory is empty, return no names, rows and columns.
 	if len(files) == 0 {
 		return nil, 0, 0
@@ -986,17 +998,28 @@ start:
 				name += fileSeparator
 			}
 
+			names[i][j] = name
+			if idx := indexOf(files[n].Name(), selectedFiles); idx > -1 {
+				names[i][j] += "*" // selector marking that this file needs to be appended with a `(X)`
+			}
+
 			n++ // Next file.
 
 			if maxNameSize < strlen(name) {
 				maxNameSize = strlen(name)
 			}
-			names[i][j] = name
 		}
 
 		// Append spaces to make all names in one column of same size.
 		for j := 0; j < rows; j++ {
-			names[i][j] += Repeat(" ", maxNameSize-strlen(names[i][j]))
+			name := names[i][j]
+			if LastIndex(name, "*") == len(name)-1 && len(name) > 0 {
+				name = name[:len(name)-1]
+				name += Repeat(" ", max(maxNameSize-strlen(name), 0)) + " (X)"
+			} else {
+				name += Repeat(" ", max(maxNameSize-strlen(name)+4, 0))
+			}
+			names[i][j] = name
 		}
 	}
 
@@ -1044,4 +1067,12 @@ func (m *model) performPendingDeletions() {
 		remove(toDelete.path)
 	}
 	m.toBeDeleted = nil
+}
+
+func indexOf(fileName string, selectedFiles []selectedFile) int {
+	idx := slices.IndexFunc(selectedFiles, func(s selectedFile) bool {
+		_, file := filepath.Split(s.path)
+		return EqualFold(file, fileName)
+	})
+	return idx
 }
