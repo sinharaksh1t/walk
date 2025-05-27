@@ -30,3 +30,7 @@ func (s *Set[T]) Remove(element T) {
 	// https://go.dev/doc/effective_go#maps
 	delete(s.hashset, element)
 }
+
+func (s *Set[T]) Clear() {
+	clear(s.hashset)
+}

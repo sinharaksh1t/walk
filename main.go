@@ -382,7 +382,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		// Visual mode (aka selection mode). Used only while deleting multiple files/directories.
+		// Select file under the cursor. Used for deleting multiple files.
 		case key.Matches(msg, keySelect):
 			filePathToSelect, ok := m.currentFile()
 			if ok {
@@ -393,6 +393,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectedFiles.Remove(fileName)
 				}
 			}
+			return m, nil
+
+		// Clear all selected files.
+		case key.Matches(msg, keyClearSelection):
+			m.selectedFiles.Clear()
 			return m, nil
 
 		case key.Matches(msg, keyYank):
