@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"github.com/antonmedv/walk/util"
 	"io/fs"
 	"math"
 	"os"
@@ -10,7 +11,6 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"slices"
 	. "strings"
 	"time"
 	"unicode/utf8"
@@ -63,9 +63,10 @@ func main() {
 	initStyles()
 
 	m := &model{
-		termWidth:  80,
-		termHeight: 60,
-		positions:  make(map[string]position),
+		termWidth:     80,
+		termHeight:    60,
+		positions:     make(map[string]position),
+		selectedFiles: util.NewSet[string](),
 	}
 
 	if statusBar, ok := os.LookupEnv("WALK_STATUS_BAR"); ok {
@@ -169,9 +170,7 @@ type model struct {
 	showHelp              bool                // Show help
 	statusBar             *vm.Program         // Status bar program.
 	quitting              bool                // Whether we are quitting the program.
-
-	// Might consider changing it to simply a slice of []string instead of a custom type
-	selectedFiles []selectedFile // List of files that have been selected
+	selectedFiles         *util.Set[string]   // List of files that have been selected
 }
 
 type position struct {
@@ -182,10 +181,6 @@ type position struct {
 type toDelete struct {
 	path string
 	at   time.Time
-}
-
-type selectedFile struct {
-	path string
 }
 
 type (
@@ -391,16 +386,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keySelect):
 			filePathToSelect, ok := m.currentFile()
 			if ok {
-				if pos := indexOf(filePathToSelect.Name(), m.selectedFiles); pos > -1 {
-					if pos == len(m.selectedFiles)-1 {
-						m.selectedFiles = m.selectedFiles[:pos]
-					} else {
-						m.selectedFiles = append(m.selectedFiles[:pos], m.selectedFiles[pos+1:]...)
-					}
+				fileName := filePathToSelect.Name()
+				if !m.selectedFiles.IsPresent(fileName) {
+					m.selectedFiles.Add(fileName)
 				} else {
-					m.selectedFiles = append(m.selectedFiles, selectedFile{path: filePathToSelect.Name()})
+					m.selectedFiles.Remove(fileName)
 				}
 			}
+			return m, nil
 
 		case key.Matches(msg, keyYank):
 			filePath, ok := m.filePath()
@@ -525,13 +518,20 @@ func (m *model) View() string {
 	for j := 0; j < m.rows; j++ {
 		row := make([]string, m.columns)
 		for i := 0; i < m.columns; i++ {
-			if i == m.c && j == m.r {
-				if m.deleteCurrentFile {
-					row[i] = danger.Render(names[i][j])
-				} else {
-					row[i] = cursor.Render(names[i][j])
-				}
-			} else {
+			name := sanitize(names[i][j])
+			focused := i == m.c && j == m.r
+			selected := m.selectedFiles.IsPresent(name)
+
+			switch {
+			case focused && selected:
+				row[i] = selectedFocused.Render(names[i][j])
+			case focused && m.deleteCurrentFile:
+				row[i] = danger.Render(names[i][j])
+			case focused:
+				row[i] = cursor.Render(names[i][j])
+			case selected:
+				row[i] = selectedUnfocused.Render(names[i][j])
+			default:
 				row[i] = names[i][j]
 			}
 		}
@@ -938,7 +938,7 @@ func (m *model) preview() {
 }
 
 // TODO: Write tests for this function.
-func wrap(files []os.DirEntry, selectedFiles []selectedFile, width int, height int, callback func(name string, i, j int)) ([][]string, int, int) {
+func wrap(files []os.DirEntry, selectedFiles *util.Set[string], width int, height int, callback func(name string, i, j int)) ([][]string, int, int) {
 	// If the directory is empty, return no names, rows and columns.
 	if len(files) == 0 {
 		return nil, 0, 0
@@ -998,28 +998,17 @@ start:
 				name += fileSeparator
 			}
 
-			names[i][j] = name
-			if idx := indexOf(files[n].Name(), selectedFiles); idx > -1 {
-				names[i][j] += "*" // selector marking that this file needs to be appended with a `(X)`
-			}
-
 			n++ // Next file.
 
 			if maxNameSize < strlen(name) {
 				maxNameSize = strlen(name)
 			}
+			names[i][j] = name
 		}
 
 		// Append spaces to make all names in one column of same size.
 		for j := 0; j < rows; j++ {
-			name := names[i][j]
-			if LastIndex(name, "*") == len(name)-1 && len(name) > 0 {
-				name = name[:len(name)-1]
-				name += Repeat(" ", max(maxNameSize-strlen(name), 0)) + " (X)"
-			} else {
-				name += Repeat(" ", max(maxNameSize-strlen(name)+4, 0))
-			}
-			names[i][j] = name
+			names[i][j] += Repeat(" ", max(maxNameSize-strlen(names[i][j]), 0))
 		}
 	}
 
@@ -1069,10 +1058,19 @@ func (m *model) performPendingDeletions() {
 	m.toBeDeleted = nil
 }
 
-func indexOf(fileName string, selectedFiles []selectedFile) int {
-	idx := slices.IndexFunc(selectedFiles, func(s selectedFile) bool {
-		_, file := filepath.Split(s.path)
-		return EqualFold(file, fileName)
-	})
-	return idx
+func sanitize(s string) string {
+	// Trim trailing whitespaces
+	s = TrimSpace(s)
+
+	// Trim the trailing forward slash if it's a directory
+	// Will this be different in different OSes? Maybe not because of the runtime.GOOS == "windows" conditional in View()
+	// function
+	s = TrimSuffix(s, "/")
+
+	// If --icons args is passed, trim those too
+	if showIcons && len(s) > 4 {
+		s = s[4:]
+	}
+
+	return s
 }
