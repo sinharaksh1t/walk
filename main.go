@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"github.com/antonmedv/walk/util"
 	"io/fs"
 	"math"
 	"os"
@@ -18,6 +17,7 @@ import (
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/quick"
 	"github.com/antonmedv/clipboard"
+	"github.com/antonmedv/walk/util"
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -216,7 +216,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		// Make undo work even if we are in fuzzy mode.
 		if key.Matches(msg, keyUndo) && len(m.toBeDeleted) > 0 {
-			m.toBeDeleted = m.toBeDeleted[:len(m.toBeDeleted)-1]
+			m.selectedFiles.Clear()
+			m.toBeDeleted = m.toBeDeleted[:0]
 			m.list()
 			m.previewContent = ""
 			return m, nil
@@ -224,6 +225,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if fuzzyByDefault {
 			if key.Matches(msg, keyBack) {
+				m.selectedFiles.Clear()
 				if len(m.search) > 0 {
 					m.search = m.search[:strlen(m.search)-1]
 					return m, nil
@@ -243,6 +245,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchMode = false
 				return m, nil
 			} else if key.Matches(msg, keyBack) {
+				m.selectedFiles.Clear()
 				if len(m.search) > 0 {
 					m.search = m.search[:strlen(m.search)-1]
 				} else {
@@ -269,6 +272,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case key.Matches(msg, keyOpen):
+			m.selectedFiles.Clear()
 			m.search = ""
 			m.searchMode = false
 			filePath, ok := m.filePath()
@@ -294,6 +298,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, keyBack):
+			m.selectedFiles.Clear()
 			m.search = ""
 			m.searchMode = false
 			m.prevName = filepath.Base(m.path)
@@ -363,22 +368,35 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, keyDelete, keyFnDelete):
-			filePathToDelete, ok := m.filePath()
-			if ok {
-				if m.deleteCurrentFile {
-					m.deleteCurrentFile = false
-					m.toBeDeleted = append(m.toBeDeleted, toDelete{
-						path: filePathToDelete,
-						at:   time.Now().Add(6 * time.Second),
-					})
-					m.list()
-					m.previewContent = ""
-					return m, tea.Tick(time.Second, func(time.Time) tea.Msg {
-						return toBeDeletedMsg(0)
-					})
-				} else {
-					m.deleteCurrentFile = true
+			if m.selectedFiles.Size() == 0 { // Delete file under cursor
+				filePathToDelete, ok := m.filePath()
+				if ok {
+					if m.deleteCurrentFile {
+						m.deleteCurrentFile = false
+						m.toBeDeleted = append(m.toBeDeleted, toDelete{
+							path: filePathToDelete,
+							at:   time.Now().Add(6 * time.Second),
+						})
+						m.list()
+						m.previewContent = ""
+						return m, tea.Tick(time.Second, func(time.Time) tea.Msg {
+							return toBeDeletedMsg(0)
+						})
+					} else {
+						m.deleteCurrentFile = true
+					}
 				}
+			} else { // Delete selected files
+				filesToDelete := make([]toDelete, m.selectedFiles.Size())
+				for i, fileName := range m.selectedFiles.ToList() {
+					filesToDelete[i] = toDelete{path.Join(m.path, fileName), time.Now().Add(6 * time.Second)}
+				}
+				m.toBeDeleted = append(m.toBeDeleted, filesToDelete...)
+				m.list()
+				m.previewContent = ""
+				return m, tea.Tick(time.Second, func(time.Time) tea.Msg {
+					return toBeDeletedMsg(0)
+				})
 			}
 			return m, nil
 
@@ -432,15 +450,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case toBeDeletedMsg:
-		toBeDeleted := make([]toDelete, 0)
+		filesToDelete := make([]toDelete, 0)
 		for _, td := range m.toBeDeleted {
 			if td.at.After(time.Now()) {
-				toBeDeleted = append(toBeDeleted, td)
+				filesToDelete = append(filesToDelete, td)
 			} else {
 				remove(td.path)
 			}
 		}
-		m.toBeDeleted = toBeDeleted
+		m.toBeDeleted = filesToDelete
 		if len(m.toBeDeleted) > 0 {
 			return m, tea.Tick(time.Second, func(time.Time) tea.Msg {
 				return toBeDeletedMsg(0)
@@ -484,7 +502,7 @@ func (m *model) View() string {
 
 	var names [][]string
 
-	names, m.rows, m.columns = wrap(m.files, m.selectedFiles, width, height, func(name string, i, j int) {
+	names, m.rows, m.columns = wrap(m.files, width, height, func(name string, i, j int) {
 		if m.findPrevName && m.prevName == name {
 			m.c = i
 			m.r = j
@@ -590,8 +608,11 @@ func (m *model) View() string {
 		// TODO: Show most recent status bar.
 		if len(m.toBeDeleted) > 0 {
 			toDelete := m.toBeDeleted[len(m.toBeDeleted)-1]
-			timeLeft := int(toDelete.at.Sub(time.Now()).Seconds())
+			timeLeft := int(toDelete.at.Sub(time.Now()).Seconds()) // All selected files will have the same `at` time
 			deleteBar := fmt.Sprintf("%v deleted. (u)ndo %v", path.Base(toDelete.path), timeLeft)
+			if len(m.toBeDeleted) > 1 { // Delete selected files
+				deleteBar = fmt.Sprintf("%d files deleted. (u)ndo %v", len(m.toBeDeleted), timeLeft)
+			}
 			main += "\n" + danger.Render(deleteBar)
 		} else if m.yankedFilePath != "" {
 			yankBar := fmt.Sprintf("copied: %v", m.yankedFilePath)
@@ -717,7 +738,6 @@ func (m *model) moveEnd() {
 }
 
 func (m *model) list() {
-	var err error
 	m.files = nil
 
 	// ReadDir already returns files and dirs sorted by filename.
@@ -729,17 +749,17 @@ func (m *model) list() {
 		m.err = nil
 	}
 
-files:
+OUTER:
 	for _, file := range files {
 		if m.hideHidden && HasPrefix(file.Name(), ".") {
-			continue files
+			continue
 		}
 		if dirOnly && !file.IsDir() {
-			continue files
+			continue
 		}
 		for _, toDelete := range m.toBeDeleted {
 			if path.Join(m.path, file.Name()) == toDelete.path {
-				continue files
+				continue OUTER
 			}
 		}
 		m.files = append(m.files, file)
@@ -872,7 +892,7 @@ func (m *model) preview() {
 			return
 		}
 
-		names, rows, columns := wrap(files, m.selectedFiles, width, height, nil)
+		names, rows, columns := wrap(files, width, height, nil)
 
 		output := make([]string, rows)
 		for j := 0; j < rows; j++ {
@@ -943,7 +963,7 @@ func (m *model) preview() {
 }
 
 // TODO: Write tests for this function.
-func wrap(files []os.DirEntry, selectedFiles *util.Set[string], width int, height int, callback func(name string, i, j int)) ([][]string, int, int) {
+func wrap(files []os.DirEntry, width int, height int, callback func(name string, i, j int)) ([][]string, int, int) {
 	// If the directory is empty, return no names, rows and columns.
 	if len(files) == 0 {
 		return nil, 0, 0
@@ -1051,9 +1071,14 @@ start:
 }
 
 func (m *model) dontDoPendingDeletions() {
-	for _, toDelete := range m.toBeDeleted {
-		fmt.Fprintf(os.Stderr, "Was not deleted: %v\n", toDelete.path)
+	msg := "\n"
+	if len(m.toBeDeleted) == 1 {
+		msg += "\nSelected file was not deleted"
+	} else if len(m.toBeDeleted) > 1 {
+		msg += "\nSelected files were not deleted"
 	}
+
+	fmt.Fprintf(os.Stderr, msg)
 }
 
 func (m *model) performPendingDeletions() {

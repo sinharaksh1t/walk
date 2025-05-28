@@ -34,3 +34,18 @@ func (s *Set[T]) Remove(element T) {
 func (s *Set[T]) Clear() {
 	clear(s.hashset)
 }
+
+func (s *Set[T]) Size() int {
+	return len(s.hashset)
+}
+
+func (s *Set[T]) ToList() []T {
+	list := make([]T, s.Size())
+	i := 0
+	for item, _ := range s.hashset {
+		list[i] = item
+		i++
+	}
+
+	return list
+}
